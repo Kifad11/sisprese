@@ -1,150 +1,109 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
-	"sisprese/models"
 	"time"
 
+	"sisprese/models"
+	"sisprese/repositories"
+	"sisprese/services"
+
 	"github.com/gin-gonic/gin"
+	"gorm.io/gorm"
 )
 
-var Employees = []models.Employee{
-	{ID: "EMP001", Name: "Budi Santoso", Department: "Operasional Gas"},
-	{ID: "EMP002", Name: "Siti Aminah", Department: "Humas & Administrasi"},
+type Handler struct {
+	repository *repositories.Repository
+	attendance *services.AttendanceService
 }
 
-var Attendances = []models.Attendance{}
-
-func GetEmployees(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"total": len(Employees),
-		"data":  Employees,
-	})
+func New(repository *repositories.Repository, attendance *services.AttendanceService) *Handler {
+	return &Handler{repository: repository, attendance: attendance}
 }
 
-func AddEmployee(c *gin.Context) {
-	var newEmp models.Employee
-	if err := c.ShouldBindJSON(&newEmp); err != nil {
+func (h *Handler) GetEmployees(c *gin.Context) {
+	employees, err := h.repository.ListEmployees()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengambil data karyawan"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"total": len(employees), "data": employees})
+}
+
+func (h *Handler) AddEmployee(c *gin.Context) {
+	var employee models.Employee
+	if err := c.ShouldBindJSON(&employee); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	Employees = append(Employees, newEmp)
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "Karyawan berhasil ditambahkan",
-		"data":    newEmp,
-	})
+	if err := h.repository.CreateEmployee(&employee); err != nil {
+		if errors.Is(err, gorm.ErrDuplicatedKey) {
+			c.JSON(http.StatusConflict, gin.H{"error": "ID Karyawan sudah terdaftar"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal menyimpan data karyawan"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"message": "Karyawan berhasil ditambahkan", "data": employee})
 }
 
-// 3. Clock-In dengan Validasi Ganda (Tidak boleh Clock-In dua kali tanpa Clock-Out)
-func ClockIn(c *gin.Context) {
-	var req struct {
-		EmployeeID string `json:"employee_id" binding:"required"`
-	}
+type attendanceRequest struct {
+	EmployeeID string `json:"employee_id" binding:"required"`
+	Note       string `json:"note"`
+}
+
+func (h *Handler) ClockIn(c *gin.Context) {
+	var req attendanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "employee_id wajib diisi"})
 		return
 	}
-
-	// Validasi karyawan terdaftar
-	found := false
-	for _, emp := range Employees {
-		if emp.ID == req.EmployeeID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		c.JSON(http.StatusNotFound, gin.H{"error": "ID Karyawan tidak ditemukan"})
+	attendance, err := h.attendance.ClockIn(req.EmployeeID, req.Note)
+	if err != nil {
+		h.writeAttendanceError(c, err)
 		return
 	}
-
-	// Cek status presensi terakhir karyawan tersebut hari ini
-	var lastStatus string = ""
-	for _, att := range Attendances {
-		if att.EmployeeID == req.EmployeeID {
-			// Cek apakah presensi dicatat pada tanggal yang sama hari ini
-			if att.Timestamp.Format("2006-01-02") == time.Now().Format("2006-01-02") {
-				lastStatus = att.Type
-			}
-		}
-	}
-
-	// Jika status terakhir adalah "IN", artinya belum Clock-Out
-	if lastStatus == "IN" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Gagal: Karyawan sudah melakukan Clock-In dan belum Clock-Out!"})
-		return
-	}
-
-	newAtt := models.Attendance{
-		ID:         time.Now().Format("20060102150405"),
-		EmployeeID: req.EmployeeID,
-		Type:       "IN",
-		Timestamp:  time.Now(),
-	}
-	Attendances = append(Attendances, newAtt)
-
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "Clock-In berhasil dicatat",
-		"data":    newAtt,
-	})
+	c.JSON(http.StatusCreated, gin.H{"message": "Clock-In berhasil dicatat", "data": attendance})
 }
 
-// 4. Clock-Out dengan Validasi (Harus sudah Clock-In sebelumnya)
-func ClockOut(c *gin.Context) {
-	var req struct {
-		EmployeeID string `json:"employee_id" binding:"required"`
-	}
+func (h *Handler) ClockOut(c *gin.Context) {
+	var req attendanceRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "employee_id wajib diisi"})
 		return
 	}
-
-	// Validasi karyawan terdaftar
-	found := false
-	for _, emp := range Employees {
-		if emp.ID == req.EmployeeID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		c.JSON(http.StatusNotFound, gin.H{"error": "ID Karyawan tidak ditemukan"})
+	attendance, err := h.attendance.ClockOut(req.EmployeeID)
+	if err != nil {
+		h.writeAttendanceError(c, err)
 		return
 	}
-
-	// Cek status presensi terakhir hari ini
-	var lastStatus string = ""
-	for _, att := range Attendances {
-		if att.EmployeeID == req.EmployeeID {
-			if att.Timestamp.Format("2006-01-02") == time.Now().Format("2006-01-02") {
-				lastStatus = att.Type
-			}
-		}
-	}
-
-	// Jika belum pernah Clock-In atau sudah Clock-Out sebelumnya
-	if lastStatus == "" || lastStatus == "OUT" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Gagal: Karyawan belum melakukan Clock-In hari ini!"})
-		return
-	}
-
-	newAtt := models.Attendance{
-		ID:         time.Now().Format("20060102150405"),
-		EmployeeID: req.EmployeeID,
-		Type:       "OUT",
-		Timestamp:  time.Now(),
-	}
-	Attendances = append(Attendances, newAtt)
-
-	c.JSON(http.StatusCreated, gin.H{
-		"message": "Clock-Out berhasil dicatat",
-		"data":    newAtt,
-	})
+	c.JSON(http.StatusCreated, gin.H{"message": "Clock-Out berhasil dicatat", "data": attendance})
 }
 
-func GetAttendance(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
-		"total": len(Attendances),
-		"data":  Attendances,
-	})
+func (h *Handler) GetAttendance(c *gin.Context) {
+	date := c.Query("date")
+	if date != "" {
+		if _, err := time.Parse("2006-01-02", date); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Format date harus YYYY-MM-DD"})
+			return
+		}
+	}
+	attendances, err := h.attendance.List(date, c.Query("employee_id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal mengambil data presensi"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"total": len(attendances), "data": attendances})
+}
+
+func (h *Handler) writeAttendanceError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, services.ErrEmployeeNotFound):
+		c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+	case errors.Is(err, services.ErrAlreadyClockedIn), errors.Is(err, services.ErrNotClockedIn):
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	default:
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Gagal menyimpan presensi"})
+	}
 }
