@@ -8,7 +8,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Database sementara (In-Memory)
 var Employees = []models.Employee{
 	{ID: "EMP001", Name: "Budi Santoso", Department: "Operasional Gas"},
 	{ID: "EMP002", Name: "Siti Aminah", Department: "Humas & Administrasi"},
@@ -16,7 +15,6 @@ var Employees = []models.Employee{
 
 var Attendances = []models.Attendance{}
 
-// 1. Get All Employees
 func GetEmployees(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"total": len(Employees),
@@ -24,7 +22,6 @@ func GetEmployees(c *gin.Context) {
 	})
 }
 
-// 2. Add Employee
 func AddEmployee(c *gin.Context) {
 	var newEmp models.Employee
 	if err := c.ShouldBindJSON(&newEmp); err != nil {
@@ -38,7 +35,7 @@ func AddEmployee(c *gin.Context) {
 	})
 }
 
-// 3. Clock-In
+// 3. Clock-In dengan Validasi Ganda (Tidak boleh Clock-In dua kali tanpa Clock-Out)
 func ClockIn(c *gin.Context) {
 	var req struct {
 		EmployeeID string `json:"employee_id" binding:"required"`
@@ -61,6 +58,23 @@ func ClockIn(c *gin.Context) {
 		return
 	}
 
+	// Cek status presensi terakhir karyawan tersebut hari ini
+	var lastStatus string = ""
+	for _, att := range Attendances {
+		if att.EmployeeID == req.EmployeeID {
+			// Cek apakah presensi dicatat pada tanggal yang sama hari ini
+			if att.Timestamp.Format("2006-01-02") == time.Now().Format("2006-01-02") {
+				lastStatus = att.Type
+			}
+		}
+	}
+
+	// Jika status terakhir adalah "IN", artinya belum Clock-Out
+	if lastStatus == "IN" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Gagal: Karyawan sudah melakukan Clock-In dan belum Clock-Out!"})
+		return
+	}
+
 	newAtt := models.Attendance{
 		ID:         time.Now().Format("20060102150405"),
 		EmployeeID: req.EmployeeID,
@@ -75,7 +89,7 @@ func ClockIn(c *gin.Context) {
 	})
 }
 
-// 4. Clock-Out (Fitur Baru Level 1)
+// 4. Clock-Out dengan Validasi (Harus sudah Clock-In sebelumnya)
 func ClockOut(c *gin.Context) {
 	var req struct {
 		EmployeeID string `json:"employee_id" binding:"required"`
@@ -98,6 +112,22 @@ func ClockOut(c *gin.Context) {
 		return
 	}
 
+	// Cek status presensi terakhir hari ini
+	var lastStatus string = ""
+	for _, att := range Attendances {
+		if att.EmployeeID == req.EmployeeID {
+			if att.Timestamp.Format("2006-01-02") == time.Now().Format("2006-01-02") {
+				lastStatus = att.Type
+			}
+		}
+	}
+
+	// Jika belum pernah Clock-In atau sudah Clock-Out sebelumnya
+	if lastStatus == "" || lastStatus == "OUT" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Gagal: Karyawan belum melakukan Clock-In hari ini!"})
+		return
+	}
+
 	newAtt := models.Attendance{
 		ID:         time.Now().Format("20060102150405"),
 		EmployeeID: req.EmployeeID,
@@ -112,7 +142,6 @@ func ClockOut(c *gin.Context) {
 	})
 }
 
-// 5. Get All Attendance History
 func GetAttendance(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"total": len(Attendances),
